@@ -1122,7 +1122,15 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 		{
 			const UINT syncInterval = g_VSync ? 1 : 0;
 			const UINT presentFlags = g_TearingSupported && !g_VSync ? DXGI_PRESENT_ALLOW_TEARING : 0;
-			THROW_ON_FAIL(g_SwapChain->Present(syncInterval, presentFlags));
+			try {
+				auto fjfj = (g_SwapChain->Present(syncInterval, presentFlags));
+				std::cout << std::hex << fjfj << std::endl;
+				//while (true);
+			}
+			catch (...)
+			{
+
+			}
 		}
 
 		if (g_Fence->GetCompletedValue() < g_FrameFenceValues[currentBackBufferIndex])
