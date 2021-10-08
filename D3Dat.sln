@@ -1,0 +1,31 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 16.0.31515.178
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "D3Dat", "D3Dat\D3Dat.vcxproj", "{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
+		Release|x64 = Release|x64
+		Release|x86 = Release|x86
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Debug|x64.ActiveCfg = Debug|x64
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Debug|x64.Build.0 = Debug|x64
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Debug|x86.ActiveCfg = Debug|Win32
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Debug|x86.Build.0 = Debug|Win32
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Release|x64.ActiveCfg = Release|x64
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Release|x64.Build.0 = Release|x64
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Release|x86.ActiveCfg = Release|Win32
+		{DAD537D2-E078-4DD0-AE32-9DF2492D6A20}.Release|x86.Build.0 = Release|Win32
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {49CAB399-C995-4FEF-8FBA-4C366C1C148B}
+	EndGlobalSection
+EndGlobal
