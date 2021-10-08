@@ -301,32 +301,20 @@ int main(void)
 		}
 
 		THROW_ON_FAIL(factory4->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER));
-
-		ComPtr<IDXGIAdapter1> dxgiAdapter1;
+		ComPtr<IDXGIFactory6> factory6;
+		THROW_ON_FAIL(factory4.As(&factory6));
 		ComPtr<IDXGIAdapter4> dxgiAdapter4;
 
 		if (useWarp)
 		{
-			THROW_ON_FAIL(factory4->EnumWarpAdapter(__uuidof(IDXGIAdapter1), &dxgiAdapter1));
-			THROW_ON_FAIL(dxgiAdapter1.As(&dxgiAdapter4));
+			THROW_ON_FAIL(factory4->EnumWarpAdapter(__uuidof(IDXGIAdapter4), &dxgiAdapter4));
 		}
 		else
 		{
-			SIZE_T maxDedicatedVideoMemory = 0;
-			for (UINT i = 0; factory4->EnumAdapters1(i, &dxgiAdapter1) != DXGI_ERROR_NOT_FOUND; i++)
-			{
-				DXGI_ADAPTER_DESC1 dxgiAdapterDesc1;
-				dxgiAdapter1->GetDesc1(&dxgiAdapterDesc1);
-				if ((dxgiAdapterDesc1.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) == 0 &&
-					SUCCEEDED(D3D12CreateDevice(dxgiAdapter1.Get(),
-						D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device), nullptr)) &&
-					dxgiAdapterDesc1.DedicatedVideoMemory > maxDedicatedVideoMemory)
-				{
-					maxDedicatedVideoMemory = dxgiAdapterDesc1.DedicatedVideoMemory;
-					THROW_ON_FAIL(dxgiAdapter1.As(&dxgiAdapter4));
-				}
-			}
+			factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_MINIMUM_POWER, __uuidof(IDXGIAdapter4), &dxgiAdapter4);
+			
 		}
+
 		THROW_ON_FAIL(D3D12CreateDevice(dxgiAdapter4.Get(), D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device2), &g_Device));
 
 		// Enable debug messages in debug mode.
@@ -596,6 +584,7 @@ int main(void)
 			.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
 			.NumRenderTargets = 1,
 			.RTVFormats = {DXGI_FORMAT_R8G8B8A8_UNORM},
+			.DSVFormat = DXGI_FORMAT_D32_FLOAT,
 			.SampleDesc = {
 				.Count = 1,
 				.Quality = 0
