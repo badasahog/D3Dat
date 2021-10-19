@@ -13,6 +13,8 @@
 #include <cassert>
 #include <chrono>
 #include <vector>
+#include <complex>
+#include <cmath>
 //#include "d3dx12.h"
 #pragma endregion("imports")
 #pragma region("linker directives")
@@ -102,6 +104,28 @@
 
 using Microsoft::WRL::ComPtr;
 
+#pragma region("structures")
+
+struct Vertex
+{
+	DirectX::XMFLOAT3 pos;
+	DirectX::XMFLOAT4 color;
+
+};
+
+// this is the structure of our constant buffer.
+struct ConstantBuffer {
+	DirectX::XMFLOAT4 colorMultiplier;
+	DirectX::XMFLOAT4 mousePos;
+};
+struct ConstantBuffer_Iterations {
+	int numIterations;
+};
+struct ConstantBuffer_Camera {
+	int camera_xpos;
+	int camera_ypos;
+};
+#pragma endregion("structures")
 #pragma region("globals")
 constexpr uint8_t g_NumFrames = 3;
 constexpr bool showFPS = false;
@@ -152,20 +176,31 @@ static bool g_Fullscreen = false;
 static uint64_t frameCounter = 0;
 static double elapsedSeconds = 0.0;
 static std::chrono::high_resolution_clock fpsClock;
+
+ComPtr<ID3D12DescriptorHeap> mainDescriptorHeap[g_NumFrames]; // this heap will store the descripor to our constant buffer
+ComPtr<ID3D12Resource> constantBufferUploadHeap[g_NumFrames]; // this is the memory on the gpu where our constant buffer will be placed.
+
+ConstantBuffer cbColorMultiplierData; // this is the constant buffer data we will send to the gpu 
+										// (which will be placed in the resource we created above)
+ConstantBuffer_Iterations cbIterations;
+ConstantBuffer_Camera cbCamera;
+
+UINT8* cbColorMultiplierGPUAddress[g_NumFrames]; // this is a pointer to the memory location we get when we map our constant buffer
+UINT8* cbIterationsGPUAddress[g_NumFrames]; // this is a pointer to the memory location we get when we map our constant buffer
+UINT8* cbCameraGPUAddress[g_NumFrames];
+
 #pragma endregion("globals")
-
-struct Vertex
-{
-	DirectX::XMFLOAT3 pos;
-	DirectX::XMFLOAT4 color;
-
-};
 
 LRESULT CALLBACK WndProc_preinit(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK WndProc_postinit(HWND, UINT, WPARAM, LPARAM);
 
 int main(void)
 {
+
+	std::complex<double> a;
+	std::complex<double> b;
+	
+	a + b;
 	bool useWarp = false;
 
 	{
@@ -311,11 +346,11 @@ int main(void)
 		}
 		else
 		{
-			factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_MINIMUM_POWER, __uuidof(IDXGIAdapter4), &dxgiAdapter4);
-			
+			factory6->EnumAdapterByGpuPreference(1, DXGI_GPU_PREFERENCE_MINIMUM_POWER, __uuidof(IDXGIAdapter4), &dxgiAdapter4);
+
 		}
 
-		THROW_ON_FAIL(D3D12CreateDevice(dxgiAdapter4.Get(), D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device2), &g_Device));
+		THROW_ON_FAIL(D3D12CreateDevice(dxgiAdapter4.Get(), D3D_FEATURE_LEVEL_11_1, __uuidof(ID3D12Device2), &g_Device));
 
 		// Enable debug messages in debug mode.
 #ifdef _DEBUG
@@ -440,16 +475,116 @@ int main(void)
 	assert(g_FenceEvent && "Failed to create fence event.");
 
 	{
-		// create root signature
-		D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc
-		{
-			.NumParameters = 0,
-			.pParameters = nullptr,
-			.NumStaticSamplers = 0,
-			.pStaticSamplers = nullptr,
-			.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT
+		D3D12_DESCRIPTOR_RANGE  descriptorTableRanges[1] =
+		{ // only one range right now
+			{
+				.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV, // this is a range of constant buffer views (descriptors)
+				.NumDescriptors = 2, // we only have one constant buffer, so the range is only 1
+				.BaseShaderRegister = 0, // start index of the shader registers in the range
+				.RegisterSpace = 0, // space 0. can usually be zero
+				.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND // this appends the range to the end of the root signature descriptor tables
+			}
 		};
 
+		D3D12_ROOT_DESCRIPTOR_TABLE descriptorTable = {
+			.NumDescriptorRanges = _countof(descriptorTableRanges), // we only have one range
+			.pDescriptorRanges = &descriptorTableRanges[0] // the pointer to the beginning of our ranges array
+		};
+
+		// create a root parameter and fill it out
+		D3D12_ROOT_PARAMETER  rootParameters[1] = { { // only one parameter right now
+			.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, // this is a descriptor table
+			.DescriptorTable = descriptorTable, // this is our descriptor table for this root parameter
+			.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL // our vertex shader will be the only shader accessing this parameter for now
+		}
+		};
+
+		D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc =
+		{
+			.NumParameters = _countof(rootParameters),
+			.pParameters = rootParameters,
+			.NumStaticSamplers = 0,
+			.pStaticSamplers = nullptr,
+			.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+			D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+			D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+			D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS // we can deny shader stages here for better performance
+		};
+
+		for (int i = 0; i < g_NumFrames; i++)
+		{
+			D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {
+				.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+				.NumDescriptors = 1,
+				.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE
+			};
+
+			THROW_ON_FAIL(g_Device->CreateDescriptorHeap(&heapDesc, __uuidof(ID3D12DescriptorHeap), &mainDescriptorHeap[i]));
+		}
+
+		// create the constant buffer resource heap
+// We will update the constant buffer one or more times per frame, so we will use only an upload heap
+// unlike previously we used an upload heap to upload the vertex and index data, and then copied over
+// to a default heap. If you plan to use a resource for more than a couple frames, it is usually more
+// efficient to copy to a default heap where it stays on the gpu. In this case, our constant buffer
+// will be modified and uploaded at least once per frame, so we only use an upload heap
+
+// create a resource heap, descriptor heap, and pointer to cbv for each frame
+		//todo: fix
+		for (int i = 0; i < g_NumFrames; i++)
+		{
+			D3D12_HEAP_PROPERTIES heapProperties =
+			{
+				.Type = D3D12_HEAP_TYPE_UPLOAD,
+				.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+				.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+				.CreationNodeMask = 1,
+				.VisibleNodeMask = 1
+			};
+
+			D3D12_RESOURCE_DESC resourceDesc = {
+				.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+				.Alignment = 0,
+				.Width = 1024 * 64,
+				.Height = 1,
+				.DepthOrArraySize = 1,
+				.MipLevels = 1,
+				.Format = DXGI_FORMAT_UNKNOWN,
+				.SampleDesc = {
+					.Count = 1,
+					.Quality = 0
+				},
+				.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+				.Flags = D3D12_RESOURCE_FLAG_NONE,
+			};
+
+			g_Device->CreateCommittedResource(
+				&heapProperties, // this heap will be used to upload the constant buffer data
+				D3D12_HEAP_FLAG_NONE, // no flags
+				&resourceDesc, // size of the resource heap. Must be a multiple of 64KB for single-textures and constant buffers
+				D3D12_RESOURCE_STATE_GENERIC_READ, // will be data that is read from so we keep it in the generic read state
+				nullptr, // we do not have use an optimized clear value for constant buffers
+				__uuidof(ID3D12Resource), &constantBufferUploadHeap[i]);
+			constantBufferUploadHeap[i]->SetName(L"Constant Buffer Upload Resource Heap");
+			D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
+			cbvDesc.BufferLocation = constantBufferUploadHeap[i]->GetGPUVirtualAddress();
+			cbvDesc.SizeInBytes = (sizeof(ConstantBuffer) + sizeof(ConstantBuffer_Iterations) + sizeof(ConstantBuffer_Camera) + 255) & ~255;    // CB size is required to be 256-byte aligned.
+			g_Device->CreateConstantBufferView(&cbvDesc, mainDescriptorHeap[i].Get()->GetCPUDescriptorHandleForHeapStart());
+			//memset(&cbColorMultiplierData, 0, sizeof(cbColorMultiplierData));
+			cbColorMultiplierData.colorMultiplier.x = 1;
+			cbColorMultiplierData.colorMultiplier.y = 1;
+			cbColorMultiplierData.colorMultiplier.z = 1;
+
+			cbIterations.numIterations = 1;
+
+			cbCamera.camera_xpos = 0;
+			cbCamera.camera_ypos = 0;
+			D3D12_RANGE readRange{.Begin = 0, .End = 0};    // We do not intend to read from this resource on the CPU. (End is less than or equal to begin)
+			constantBufferUploadHeap[i]->Map(0, &readRange, reinterpret_cast<void**>(&cbColorMultiplierGPUAddress[i]));
+			memcpy(cbColorMultiplierGPUAddress[i], &cbColorMultiplierData, sizeof(cbColorMultiplierData));
+			memcpy(cbColorMultiplierGPUAddress[i] + sizeof(cbColorMultiplierData), &cbIterations, sizeof(cbIterations));
+			memcpy(cbColorMultiplierGPUAddress[i] + sizeof(cbColorMultiplierData) + sizeof(cbIterations), &cbCamera, sizeof(cbCamera));
+		}
 		ComPtr<ID3DBlob> signature;
 		THROW_ON_FAIL(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, nullptr));
 
@@ -659,15 +794,15 @@ int main(void)
 	}
 
 	Vertex vList[] = {
-		{.pos = {-1.f, -1.f, 0.9f}, .color{1.0f, 1.0f, 1.0f, 1.0f}},
-		{.pos = {1.0f, -1.f, 0.6f}, .color{0.0f, 0.0f, 1.0f, 1.0f}},
-		{.pos = {-1.f, 1.0f, 0.6f}, .color{1.0f, 0.0f, 0.0f, 1.0f}},
-		{.pos = {1.0f, 1.0f, 0.9f}, .color{0.0f, 1.0f, 0.0f, 1.0f}},
+		{.pos = {-1.f, -1.f, 0.9f}, .color = {1.0f, 1.0f, 1.0f, 1.0f}},
+		{.pos = {1.0f, -1.f, 0.6f}, .color = {0.0f, 0.0f, 1.0f, 1.0f}},
+		{.pos = {-1.f, 1.0f, 0.6f}, .color = {1.0f, 0.0f, 0.0f, 1.0f}},
+		{.pos = {1.0f, 1.0f, 0.9f}, .color = {0.0f, 1.0f, 0.0f, 1.0f}},
 
-		{.pos = {-.7f, -.7f, 0.1f}, .color{1.0f, 1.0f, 1.0f, 1.0f}},
-		{.pos = {0.7f, -.7f, 0.9f}, .color{0.0f, 0.0f, 1.0f, 1.0f}},
-		{.pos = {-.7f, 0.7f, 0.9f}, .color{1.0f, 0.0f, 0.0f, 1.0f}},
-		{.pos = {0.7f, 0.7f, 0.1f}, .color{0.0f, 1.0f, 0.0f, 1.0f}},
+		{.pos = {-1.0f, -1.f, 0.1f}, .color = {1.0f, 1.0f, 1.0f, 1.0f}},
+		{.pos = {1.0f, -1.f, 0.9f}, .color = {0.0f, 0.0f, 1.0f, 1.0f}},
+		{.pos = {-1.0f, 1.f, 0.9f}, .color = {1.0f, 0.0f, 0.0f, 1.0f}},
+		{.pos = {1.0f, 1.f, 0.1f}, .color = {0.0f, 1.0f, 0.0f, 1.0f}},
 	};
 
 	constexpr UINT64 vBufferSize = sizeof(vList);
@@ -983,12 +1118,13 @@ int main(void)
 
 
 	SetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)&WndProc_postinit);
-
-
-
+	
 	MSG msg{};
 	while (msg.message != WM_QUIT)
 	{
+		{
+			memcpy(cbColorMultiplierGPUAddress[g_SwapChain->GetCurrentBackBufferIndex()], &cbColorMultiplierData, sizeof(cbColorMultiplierData));
+		}
 		if (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
 		{
 			TranslateMessage(&msg);
@@ -1068,6 +1204,8 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 			const FLOAT clearColor1[] = { sin(temp), cos(temp), .5f, 1.0f };
 			const FLOAT clearColor2[] = { cos(temp), .5f, sin(temp), 1.0f };
 
+			//temp anchor
+
 			D3D12_RESOURCE_BARRIER barrier2
 			{
 				.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
@@ -1094,11 +1232,34 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 			//at long last, the actual graphics commands:
 			//g_CommandList->SetPipelineState(isWireframe ? pipelineStateObject2.Get() : pipelineStateObject.Get());
 			g_CommandList->Reset(g_CommandAllocators[currentBackBufferIndex].Get(), isWireframe ? pipelineStateObject.Get() : pipelineStateObject2.Get());
+			//cbIterations.numIterations = 1;
+			{
+				POINT p;
+				GetCursorPos(&p);
+
+				cbColorMultiplierData.mousePos.x = (p.x / (g_ClientWidth /  2.)) - 2;
+				cbColorMultiplierData.mousePos.y = (p.y / (g_ClientHeight / 2.)) - 2;
+			}
+			
+			// copy our ConstantBuffer instance to the mapped constant buffer resource
+			
+			
+			memcpy(cbColorMultiplierGPUAddress[currentBackBufferIndex], &cbColorMultiplierData, sizeof(cbColorMultiplierData));
+			memcpy(cbColorMultiplierGPUAddress[currentBackBufferIndex] + sizeof(cbColorMultiplierData), &cbIterations, sizeof(cbIterations));
+
 			g_CommandList->ResourceBarrier(1, &barrier1);
 			g_CommandList->SetGraphicsRootSignature(rootSignature.Get());
 			g_CommandList->OMSetRenderTargets(1, &rtv, FALSE, &dsvHandle);
 			g_CommandList->ClearRenderTargetView(rtv, clearColor1, 0, nullptr);
 			g_CommandList->ClearDepthStencilView(dsDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+
+			// set constant buffer descriptor heap
+			ID3D12DescriptorHeap* descriptorHeaps[] = { mainDescriptorHeap[currentBackBufferIndex].Get() };
+			g_CommandList->SetDescriptorHeaps(_countof(descriptorHeaps), descriptorHeaps);
+
+			// set the root descriptor table 0 to the constant buffer descriptor heap
+			g_CommandList->SetGraphicsRootDescriptorTable(0, mainDescriptorHeap[currentBackBufferIndex]->GetGPUDescriptorHandleForHeapStart());
+
 			g_CommandList->RSSetViewports(1, &viewport);
 			g_CommandList->RSSetScissorRects(1, &scissorRect);
 			g_CommandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1122,15 +1283,8 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 		{
 			const UINT syncInterval = g_VSync ? 1 : 0;
 			const UINT presentFlags = g_TearingSupported && !g_VSync ? DXGI_PRESENT_ALLOW_TEARING : 0;
-			try {
-				auto fjfj = (g_SwapChain->Present(syncInterval, presentFlags));
-				std::cout << std::hex << fjfj << std::endl;
-				//while (true);
-			}
-			catch (...)
-			{
-
-			}
+			
+			g_SwapChain->Present(syncInterval, presentFlags);
 		}
 
 		if (g_Fence->GetCompletedValue() < g_FrameFenceValues[currentBackBufferIndex])
@@ -1150,36 +1304,50 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 
 		switch (wParam)
 		{
-		case 'Q':
-			viewport.TopLeftX -= .0000006 * deltaTime.count();
-			viewport.TopLeftY -= .0000006 * deltaTime.count();
-			viewport.Width += .0000012 * deltaTime.count();
-			viewport.Height += .0000012 * deltaTime.count();
+		case 'Q'://zoom out
+			cbColorMultiplierData.colorMultiplier.z *= 1.1f;
 			break;
-		case 'E':
-			viewport.TopLeftX += .0000006 * deltaTime.count();
-			viewport.TopLeftY += .0000006 * deltaTime.count();
-			viewport.Width -= .0000012 * deltaTime.count();
-			viewport.Height -= .0000012 * deltaTime.count();
+		case 'E'://zoom in
+			cbColorMultiplierData.colorMultiplier.z *= .9;
 			break;
 		case 'Z':
 			isWireframe = !isWireframe;
 			break;
 		case 'A':
-			viewport.TopLeftX += .0000006 * deltaTime.count();
+			cbColorMultiplierData.colorMultiplier.x -= .1* cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'D':
-			viewport.TopLeftX -= .0000006 * deltaTime.count();
+			cbColorMultiplierData.colorMultiplier.x += .1 * cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'S':
-			viewport.TopLeftY -= .0000006 * deltaTime.count();
+			cbColorMultiplierData.colorMultiplier.y -=.1 * cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'W':
-			viewport.TopLeftY += .0000006 * deltaTime.count();
+			cbColorMultiplierData.colorMultiplier.y += .1 * cbColorMultiplierData.colorMultiplier.z;
+			break;
+		case 'I':
+			//cbColorMultiplierData.mousePos.y -= .1;
+			break;
+		case 'K':
+			//cbColorMultiplierData.mousePos.y += .1;
+			break;
+
+		case 'J':
+			//cbColorMultiplierData.mousePos.x -= .1;
+			break;
+
+		case 'L':
+			//cbColorMultiplierData.mousePos.x += .1;
 			break;
 		case 'V':
 			g_VSync = !g_VSync;
 			break;
+		case 'T':
+			cbIterations.numIterations+=1;
+			break; 
+		case 'Y':
+				cbIterations.numIterations -= 1;
+				break;
 		case VK_ESCAPE:
 			PostQuitMessage(0);
 			break;
