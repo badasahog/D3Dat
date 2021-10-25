@@ -129,6 +129,9 @@ struct ConstantBuffer_Camera {
 #pragma region("globals")
 constexpr uint8_t g_NumFrames = 3;
 constexpr bool showFPS = false;
+constexpr wchar_t const* FENCE_NAME = L"_GlobalFence";
+constexpr UINT sampleCount = 8;
+constexpr UINT sampleQuality = 0;
 
 uint32_t g_ClientWidth = 1280;
 uint32_t g_ClientHeight = 720;
@@ -141,6 +144,7 @@ static ComPtr<ID3D12Device2> g_Device;
 static ComPtr<ID3D12CommandQueue> g_CommandQueue;
 static ComPtr<IDXGISwapChain4> g_SwapChain;
 static ComPtr<ID3D12Resource> g_BackBuffers[g_NumFrames];
+static ComPtr<ID3D12Resource> g_IntermediateBuffers[g_NumFrames];
 static ComPtr<ID3D12GraphicsCommandList> g_CommandList;
 static ComPtr<ID3D12CommandAllocator> g_CommandAllocators[g_NumFrames];
 static ComPtr<ID3D12DescriptorHeap> g_RTVDescriptorHeap;
@@ -148,6 +152,7 @@ static ComPtr<ID3D12DescriptorHeap> m_DSVHeap;
 static ComPtr<ID3D12Fence> g_Fence;
 static ComPtr<ID3D12PipelineState> pipelineStateObject;
 static ComPtr<ID3D12PipelineState> pipelineStateObject2;
+static ComPtr<ID3D12PipelineState> pipelineStateObject_msaa;
 static ComPtr<ID3D12RootSignature> rootSignature;
 
 static ComPtr<ID3D12Resource> depthStencilBuffer;
@@ -196,11 +201,6 @@ LRESULT CALLBACK WndProc_postinit(HWND, UINT, WPARAM, LPARAM);
 
 int main(void)
 {
-
-	std::complex<double> a;
-	std::complex<double> b;
-	
-	a + b;
 	bool useWarp = false;
 
 	{
@@ -229,16 +229,11 @@ int main(void)
 	HINSTANCE hInstance;
 	GetModuleHandleExW(0, nullptr, &hInstance);
 
-	// Windows 10 Creators update adds Per Monitor V2 DPI awareness context.
-	// Using this awareness context allows the client area of the window 
-	// to achieve 100% scaling while still allowing non-client window content to 
-	// be rendered in a DPI sensitive fashion.
-
 	// TODO: what is this?
 	//SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
 	// Window class name. Used for registering / creating the window.
-	const wchar_t* windowClassName = L"DX12WindowClass";
+	constexpr wchar_t const* windowClassName = L"DX12WindowClass";
 
 
 	ComPtr<IDXGIFactory4> factory4;
@@ -248,10 +243,19 @@ int main(void)
 	THROW_ON_FAIL(D3D12GetDebugInterface(__uuidof(ID3D12Debug), &debugInterface));
 	debugInterface->EnableDebugLayer();
 #endif
+
 	{
 		BOOL allowTearing = FALSE;
 
-		if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory4), &factory4)))
+		constexpr UINT createFactoryFlags =
+#ifdef _DEBUG
+			DXGI_CREATE_FACTORY_DEBUG
+#else
+			0
+#endif
+			;
+		//TODO: why create a IDXGIFactory4, then cast to IDXGIFactory5?
+		if (SUCCEEDED(CreateDXGIFactory2(createFactoryFlags, __uuidof(IDXGIFactory4), &factory4)))
 		{
 			ComPtr<IDXGIFactory5> factory5;
 			if (SUCCEEDED(factory4.As(&factory5)))
@@ -268,7 +272,7 @@ int main(void)
 	}
 
 	{
-		const WNDCLASSEXW windowClass{
+		const WNDCLASSEXW windowClass = {
 			.cbSize = sizeof(WNDCLASSEXW),
 			.style = CS_HREDRAW | CS_VREDRAW,
 			.lpfnWndProc = &WndProc_preinit,
@@ -285,10 +289,12 @@ int main(void)
 
 		ASSERT_SUCCESS(RegisterClassExW(&windowClass));
 	}
+
 	HWND hWnd;
+
 	{
-		int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-		int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+		const int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+		const int screenHeight = GetSystemMetrics(SM_CYSCREEN);
 
 		g_WindowRect = {
 			.left = 0,
@@ -299,8 +305,8 @@ int main(void)
 
 		AdjustWindowRect(&g_WindowRect, WS_OVERLAPPEDWINDOW, FALSE);
 
-		int windowWidth = g_WindowRect.right - g_WindowRect.left;
-		int windowHeight = g_WindowRect.bottom - g_WindowRect.top;
+		const int windowWidth = g_WindowRect.right - g_WindowRect.left;
+		const int windowHeight = g_WindowRect.bottom - g_WindowRect.top;
 
 		// Center the window within the screen. Clamp to 0, 0 for the top-left corner.
 
@@ -324,17 +330,7 @@ int main(void)
 	}
 
 	{
-		{
-			const UINT createFactoryFlags =
-#ifdef _DEBUG
-				DXGI_CREATE_FACTORY_DEBUG
-#else
-				0
-#endif
-				;
-			THROW_ON_FAIL(CreateDXGIFactory2(createFactoryFlags, __uuidof(IDXGIFactory4), &factory4));
-		}
-
+		//TODO: no effect?
 		THROW_ON_FAIL(factory4->MakeWindowAssociation(hWnd, DXGI_MWA_NO_ALT_ENTER));
 		ComPtr<IDXGIFactory6> factory6;
 		THROW_ON_FAIL(factory4.As(&factory6));
@@ -343,15 +339,21 @@ int main(void)
 		if (useWarp)
 		{
 			THROW_ON_FAIL(factory4->EnumWarpAdapter(__uuidof(IDXGIAdapter4), &dxgiAdapter4));
+			THROW_ON_FAIL(D3D12CreateDevice(dxgiAdapter4.Get(), D3D_FEATURE_LEVEL_12_1, __uuidof(ID3D12Device2), &g_Device));
 		}
 		else
 		{
-			factory6->EnumAdapterByGpuPreference(1, DXGI_GPU_PREFERENCE_MINIMUM_POWER, __uuidof(IDXGIAdapter4), &dxgiAdapter4);
-
+			factory6->EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, __uuidof(IDXGIAdapter4), &dxgiAdapter4);
+			THROW_ON_FAIL(D3D12CreateDevice(dxgiAdapter4.Get(), D3D_FEATURE_LEVEL_11_1, __uuidof(ID3D12Device2), &g_Device));
 		}
 
-		THROW_ON_FAIL(D3D12CreateDevice(dxgiAdapter4.Get(), D3D_FEATURE_LEVEL_11_1, __uuidof(ID3D12Device2), &g_Device));
+		D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS msLevels;
+		msLevels.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // Replace with your render target format.
+		msLevels.SampleCount = sampleCount; // Replace with your sample count.
+		msLevels.Flags = D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE;
 
+		g_Device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &msLevels, sizeof(msLevels));
+		std::cout << "quality levels " << msLevels.NumQualityLevels << std::endl;
 		// Enable debug messages in debug mode.
 #ifdef _DEBUG
 		ComPtr<ID3D12InfoQueue> pInfoQueue;
@@ -418,7 +420,7 @@ int main(void)
 			.Flags = (g_TearingSupported) ? (DWORD)DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : (DWORD)0
 		};
 
-		ComPtr<IDXGISwapChain1> swapChain1;
+		ComPtr<IDXGISwapChain1> swapChain1;//intermediate
 
 		THROW_ON_FAIL(factory4->CreateSwapChainForHwnd(
 			g_CommandQueue.Get(),
@@ -433,18 +435,64 @@ int main(void)
 	{
 		D3D12_DESCRIPTOR_HEAP_DESC desc = {
 			.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-			.NumDescriptors = g_NumFrames
+			.NumDescriptors = g_NumFrames * 2 //Swap chain render targets + intermediate render targets
 		};
-
 		THROW_ON_FAIL(g_Device->CreateDescriptorHeap(&desc, __uuidof(ID3D12DescriptorHeap), &g_RTVDescriptorHeap));
 	}
 
 	{
+
 		D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = g_RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart();
 		ComPtr<ID3D12Resource> backBuffer;
 		const INT64 descriptorHandleIncrementSize = (INT64)g_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 		for (int i = 0; i < g_NumFrames; i++)
 		{
+			//TODO: create intermediate render target with higher sample count
+
+			D3D12_HEAP_PROPERTIES heapProperties =
+			{
+				.Type = D3D12_HEAP_TYPE_DEFAULT,
+				.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+				.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+				.CreationNodeMask = 1,
+				.VisibleNodeMask = 1
+			};
+
+			D3D12_RESOURCE_DESC resourceDesc = {
+				.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+				.Alignment = 0,
+				.Width = g_ClientWidth,
+				.Height = g_ClientHeight,
+				.DepthOrArraySize = 1,
+				.MipLevels = 1,
+				.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+				.SampleDesc = {
+					.Count = sampleCount,
+					.Quality = sampleQuality
+				},
+				.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+				.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET
+			};
+
+			g_Device->CreateCommittedResource(
+				&heapProperties,
+				D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES,
+				&resourceDesc,
+				D3D12_RESOURCE_STATE_RENDER_TARGET,
+				nullptr,
+				__uuidof(ID3D12Resource),
+				&g_IntermediateBuffers[i]
+			);
+
+			g_IntermediateBuffers[i]->SetName(L"Intermediate Render Target");
+			g_Device->CreateRenderTargetView(g_IntermediateBuffers[i].Get(), nullptr, rtvHandle);
+
+			rtvHandle.ptr = (SIZE_T)((INT64)rtvHandle.ptr + descriptorHandleIncrementSize);
+		}
+
+		for (int i = 0; i < g_NumFrames; i++)
+		{
+
 			THROW_ON_FAIL(g_SwapChain->GetBuffer(i, __uuidof(ID3D12Resource), &backBuffer));
 
 			g_Device->CreateRenderTargetView(backBuffer.Get(), nullptr, rtvHandle);
@@ -470,7 +518,7 @@ int main(void)
 
 	THROW_ON_FAIL(g_Device->CreateFence(g_FenceValue, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence), &g_Fence));
 
-	HANDLE g_FenceEvent = CreateEventW(nullptr, FALSE, FALSE, L"_GlobalFence");
+	HANDLE g_FenceEvent = CreateEventW(nullptr, FALSE, FALSE, FENCE_NAME);
 
 	assert(g_FenceEvent && "Failed to create fence event.");
 
@@ -579,7 +627,7 @@ int main(void)
 
 			cbCamera.camera_xpos = 0;
 			cbCamera.camera_ypos = 0;
-			D3D12_RANGE readRange{.Begin = 0, .End = 0};    // We do not intend to read from this resource on the CPU. (End is less than or equal to begin)
+			D3D12_RANGE readRange{ .Begin = 0, .End = 0 };    // We do not intend to read from this resource on the CPU. (End is less than or equal to begin)
 			constantBufferUploadHeap[i]->Map(0, &readRange, reinterpret_cast<void**>(&cbColorMultiplierGPUAddress[i]));
 			memcpy(cbColorMultiplierGPUAddress[i], &cbColorMultiplierData, sizeof(cbColorMultiplierData));
 			memcpy(cbColorMultiplierGPUAddress[i] + sizeof(cbColorMultiplierData), &cbIterations, sizeof(cbIterations));
@@ -728,6 +776,9 @@ int main(void)
 		THROW_ON_FAIL(g_Device->CreateGraphicsPipelineState(&psoDesc, __uuidof(ID3D12PipelineState), &pipelineStateObject));
 		psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
 		THROW_ON_FAIL(g_Device->CreateGraphicsPipelineState(&psoDesc, __uuidof(ID3D12PipelineState), &pipelineStateObject2));
+		psoDesc.DepthStencilState = {};
+		psoDesc.SampleDesc.Count = sampleCount;
+		THROW_ON_FAIL(g_Device->CreateGraphicsPipelineState(&psoDesc, __uuidof(ID3D12PipelineState), &pipelineStateObject_msaa));
 	}
 
 	{
@@ -1118,7 +1169,7 @@ int main(void)
 
 
 	SetWindowLongPtrW(hWnd, GWLP_WNDPROC, (LONG_PTR)&WndProc_postinit);
-	
+
 	MSG msg{};
 	while (msg.message != WM_QUIT)
 	{
@@ -1204,7 +1255,7 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 			const FLOAT clearColor1[] = { sin(temp), cos(temp), .5f, 1.0f };
 			const FLOAT clearColor2[] = { cos(temp), .5f, sin(temp), 1.0f };
 
-			//temp anchor
+
 
 			D3D12_RESOURCE_BARRIER barrier2
 			{
@@ -1218,9 +1269,73 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 					.StateAfter = D3D12_RESOURCE_STATE_PRESENT
 				}
 			};
-			D3D12_CPU_DESCRIPTOR_HANDLE rtv = {
+
+
+			D3D12_RESOURCE_BARRIER resolutionBarrier1
+			{
+				.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+				.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+				.Transition =
+				{
+					.pResource = g_IntermediateBuffers[currentBackBufferIndex].Get(),
+					.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+					.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
+					.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_SOURCE
+				}
+			};
+
+			D3D12_RESOURCE_BARRIER resolutionBarrier2
+			{
+				.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+				.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+				.Transition =
+				{
+					.pResource = g_IntermediateBuffers[currentBackBufferIndex].Get(),
+					.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+					.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_SOURCE,
+					.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET
+				}
+			};
+
+
+			D3D12_RESOURCE_BARRIER resolutionDestBarrier1
+			{
+				.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+				.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+				.Transition =
+				{
+					.pResource = g_BackBuffers[currentBackBufferIndex].Get(),
+					.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+					.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
+					.StateAfter = D3D12_RESOURCE_STATE_RESOLVE_DEST
+				}
+			};
+
+			D3D12_RESOURCE_BARRIER resolutionDestBarrier2
+			{
+				.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+				.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+				.Transition =
+				{
+					.pResource = g_BackBuffers[currentBackBufferIndex].Get(),
+					.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+					.StateBefore = D3D12_RESOURCE_STATE_RESOLVE_DEST,
+					.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET
+				}
+			};
+
+			D3D12_CPU_DESCRIPTOR_HANDLE rtv1 = {
 					.ptr = (SIZE_T)(
 							(INT64)g_RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr +
+							(INT64)currentBackBufferIndex *
+							(INT64)g_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
+						)
+			};
+			D3D12_CPU_DESCRIPTOR_HANDLE rtv2 = {
+					.ptr = (SIZE_T)(
+							(INT64)g_RTVDescriptorHeap->GetCPUDescriptorHandleForHeapStart().ptr +
+							(INT64)g_NumFrames *
+							(INT64)g_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV) +
 							(INT64)currentBackBufferIndex *
 							(INT64)g_Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV)
 						)
@@ -1237,21 +1352,21 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 				POINT p;
 				GetCursorPos(&p);
 
-				cbColorMultiplierData.mousePos.x = (p.x / (g_ClientWidth /  2.)) - 2;
+				cbColorMultiplierData.mousePos.x = (p.x / (g_ClientWidth / 2.)) - 2;
 				cbColorMultiplierData.mousePos.y = (p.y / (g_ClientHeight / 2.)) - 2;
 			}
-			
+
 			// copy our ConstantBuffer instance to the mapped constant buffer resource
-			
-			
+
+
 			memcpy(cbColorMultiplierGPUAddress[currentBackBufferIndex], &cbColorMultiplierData, sizeof(cbColorMultiplierData));
 			memcpy(cbColorMultiplierGPUAddress[currentBackBufferIndex] + sizeof(cbColorMultiplierData), &cbIterations, sizeof(cbIterations));
-
+			g_CommandList->SetPipelineState(pipelineStateObject_msaa.Get());
 			g_CommandList->ResourceBarrier(1, &barrier1);
 			g_CommandList->SetGraphicsRootSignature(rootSignature.Get());
-			g_CommandList->OMSetRenderTargets(1, &rtv, FALSE, &dsvHandle);
-			g_CommandList->ClearRenderTargetView(rtv, clearColor1, 0, nullptr);
-			g_CommandList->ClearDepthStencilView(dsDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
+			g_CommandList->OMSetRenderTargets(1, &rtv1, FALSE, NULL);
+			g_CommandList->ClearRenderTargetView(rtv1, clearColor1, 0, nullptr);
+			//g_CommandList->ClearDepthStencilView(dsDescriptorHeap->GetCPUDescriptorHandleForHeapStart(), D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, nullptr);
 
 			// set constant buffer descriptor heap
 			ID3D12DescriptorHeap* descriptorHeaps[] = { mainDescriptorHeap[currentBackBufferIndex].Get() };
@@ -1266,8 +1381,18 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 			g_CommandList->IASetVertexBuffers(0, 1, &vertexBufferView);
 			g_CommandList->IASetIndexBuffer(&indexBufferView);
 			g_CommandList->DrawIndexedInstanced(6, 1, 6, 0, 0);
+
+			g_CommandList->SetPipelineState(pipelineStateObject2.Get());
+			g_CommandList->OMSetRenderTargets(1, &rtv2, FALSE, NULL);
+			//TODO: convert intermediate buffer state to D3D12_RESOURCE_STATE_RESOLVE_SOURCE
+			g_CommandList->ResourceBarrier(1, &resolutionBarrier1);
+			g_CommandList->ResourceBarrier(1, &resolutionDestBarrier1);
+			g_CommandList->ResolveSubresource(g_BackBuffers[currentBackBufferIndex].Get(), 0, g_IntermediateBuffers[currentBackBufferIndex].Get(), 0, DXGI_FORMAT_R8G8B8A8_UNORM);
 			//g_CommandList->DrawIndexedInstanced(6, 1, 0, 0, 0);
+			g_CommandList->ResourceBarrier(1, &resolutionBarrier2);
+			g_CommandList->ResourceBarrier(1, &resolutionDestBarrier2);
 			g_CommandList->ResourceBarrier(1, &barrier2);
+
 			THROW_ON_FAIL(g_CommandList->Close());
 
 			ID3D12CommandList* const commandLists[] = { g_CommandList.Get() };
@@ -1283,13 +1408,13 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 		{
 			const UINT syncInterval = g_VSync ? 1 : 0;
 			const UINT presentFlags = g_TearingSupported && !g_VSync ? DXGI_PRESENT_ALLOW_TEARING : 0;
-			
+
 			g_SwapChain->Present(syncInterval, presentFlags);
 		}
 
 		if (g_Fence->GetCompletedValue() < g_FrameFenceValues[currentBackBufferIndex])
 		{
-			HANDLE fenceEvent = OpenEventW(EVENT_ALL_ACCESS, FALSE, L"_GlobalFence");
+			HANDLE fenceEvent = OpenEventW(EVENT_ALL_ACCESS, FALSE, FENCE_NAME);
 			if (fenceEvent == NULL)
 				throw std::exception();
 			THROW_ON_FAIL(g_Fence->SetEventOnCompletion(g_FrameFenceValues[currentBackBufferIndex], fenceEvent));
@@ -1314,40 +1439,40 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 			isWireframe = !isWireframe;
 			break;
 		case 'A':
-			cbColorMultiplierData.colorMultiplier.x -= .1* cbColorMultiplierData.colorMultiplier.z;
+			cbColorMultiplierData.colorMultiplier.x -= .1 * cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'D':
 			cbColorMultiplierData.colorMultiplier.x += .1 * cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'S':
-			cbColorMultiplierData.colorMultiplier.y -=.1 * cbColorMultiplierData.colorMultiplier.z;
+			cbColorMultiplierData.colorMultiplier.y -= .1 * cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'W':
 			cbColorMultiplierData.colorMultiplier.y += .1 * cbColorMultiplierData.colorMultiplier.z;
 			break;
 		case 'I':
-			//cbColorMultiplierData.mousePos.y -= .1;
 			break;
 		case 'K':
-			//cbColorMultiplierData.mousePos.y += .1;
 			break;
-
 		case 'J':
-			//cbColorMultiplierData.mousePos.x -= .1;
 			break;
-
 		case 'L':
-			//cbColorMultiplierData.mousePos.x += .1;
 			break;
 		case 'V':
 			g_VSync = !g_VSync;
 			break;
 		case 'T':
-			cbIterations.numIterations+=1;
-			break; 
+			cbIterations.numIterations += 1;
+			break;
 		case 'Y':
-				cbIterations.numIterations -= 1;
-				break;
+			cbIterations.numIterations -= 1;
+			break;
+		case 'G':
+			cbIterations.numIterations += 100;
+			break;
+		case 'H':
+			cbIterations.numIterations -= 100;
+			break;
 		case VK_ESCAPE:
 			PostQuitMessage(0);
 			break;
@@ -1372,8 +1497,8 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 					// when using a multi-monitor setup.
 					HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 
-					MONITORINFOEXW monitorInfo{{.cbSize = sizeof(MONITORINFOEXW)}};
-					
+					MONITORINFOEXW monitorInfo{ {.cbSize = sizeof(MONITORINFOEXW)} };
+
 					GetMonitorInfoW(hMonitor, &monitorInfo);
 
 					SetWindowPos(hwnd, HWND_TOPMOST,
@@ -1431,7 +1556,7 @@ LRESULT CALLBACK WndProc_postinit(HWND hwnd, UINT message, WPARAM wParam, LPARAM
 
 			if (g_Fence->GetCompletedValue() < g_FenceValue)
 			{
-				HANDLE fenceEvent = OpenEventW(EVENT_ALL_ACCESS, FALSE, L"_GlobalFence");
+				HANDLE fenceEvent = OpenEventW(EVENT_ALL_ACCESS, FALSE, FENCE_NAME);
 				THROW_ON_FAIL(g_Fence->SetEventOnCompletion(g_FenceValue, fenceEvent));
 				WaitForSingleObject(fenceEvent, static_cast<DWORD>(std::chrono::milliseconds::max().count()));
 			}
